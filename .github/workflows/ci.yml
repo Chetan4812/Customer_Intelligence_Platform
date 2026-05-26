@@ -1,0 +1,57 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.11"
+        
+    - name: Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest pandera
+        
+    - name: Generate Sample Data
+      run: |
+        python scripts/generate_sample_data.py
+        
+    - name: Run Data Validation
+      run: |
+        python scripts/validate_data.py
+        
+    - name: Train ML Model
+      run: |
+        python services/conversion/train.py
+        
+    - name: Run Integration Checks
+      run: |
+        python scripts/verify.py > verify_output.log 2>&1 || (cat verify_output.log && exit 1)
+        
+    - name: Run Unit Tests
+      run: |
+        pytest tests/ -v > pytest_output.log 2>&1 || (cat pytest_output.log && exit 1)
+
+    - name: Commit logs on failure
+      if: failure()
+      run: |
+        git config --global user.name "GitHub Actions"
+        git config --global user.email "actions@github.com"
+        git pull origin main --rebase || true
+        git add -f verify_output.log || true
+        git add -f pytest_output.log || true
+        git commit -m "Commit debug logs from failed run [skip ci]" || true
+        git push origin main

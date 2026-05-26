@@ -1,0 +1,32 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Unit test / coverage reports
+.pytest_cache/
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Data and Models
+models/
+!models/.gitkeep
+data/campaign/
+data/complaints/.gitkeep
+# Allow complaint documents — needed for Docker build on GitHub Actions
+!data/complaints/*.txt
+
+# IDEs
+.idea/
+.vscode/
+
+# Logs
+*.log

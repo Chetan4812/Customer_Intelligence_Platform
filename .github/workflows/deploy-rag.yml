@@ -1,0 +1,192 @@
+# =============================================================================
+# deploy-rag.yml — Continuous Deployment: RAG Service → Azure App Service
+# =============================================================================
+# Triggers on every push to 'main' that touches RAG-related files.
+# Builds the RAG Docker image, pushes it to ACR, then deploys to Azure.
+#
+# Required GitHub Secrets:
+#   AZURE_CREDENTIALS        – Service principal JSON  (az ad sp create-for-rbac)
+#   ACR_PASSWORD             – ACR admin password       (cipregistry13)
+#   GROQ_API_KEY             – Groq cloud API key
+# =============================================================================
+
+name: Deploy RAG to Azure
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - "services/rag/**"
+      - "docker/Dockerfile.rag-azure"
+      - "requirements.txt"
+      - "data/complaints/**"
+      - ".github/workflows/deploy-rag.yml"
+  workflow_dispatch:          # Allow manual trigger from GitHub UI
+
+env:
+  RESOURCE_GROUP:  cip-rg-13
+  ACR_NAME:        cipregistry13
+  APP_NAME:        cip-rag-13
+  IMAGE_NAME:      weel13-rag-azure
+  IMAGE_TAG:       latest
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 1: Build & Push Docker image to ACR
+  # ─────────────────────────────────────────────────────────────────────────
+  build-and-push:
+    name: 🐳 Build & Push RAG Image
+    runs-on: ubuntu-latest
+    outputs:
+      image-tag: ${{ steps.meta.outputs.image-full }}
+
+    steps:
+      - name: ⬇️ Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Login to Azure ──────────────────────────────────────────────────
+      - name: 🔐 Login to Azure
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      # ── Get ACR login server ───────────────────────────────────────────
+      - name: 📦 Get ACR login server
+        id: acr-meta
+        run: |
+          ACR_SERVER=$(az acr show \
+            --name ${{ env.ACR_NAME }} \
+            --query loginServer \
+            --output tsv)
+          echo "server=$ACR_SERVER" >> $GITHUB_OUTPUT
+
+      # ── Login to ACR ────────────────────────────────────────────────────
+      - name: 🔑 Login to Azure Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ steps.acr-meta.outputs.server }}
+          username: ${{ env.ACR_NAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      # ── Set full image tag ───────────────────────────────────────────────
+      - name: 🏷️ Set image metadata
+        id: meta
+        run: |
+          FULL="${{ steps.acr-meta.outputs.server }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
+          SHA_TAG="${{ steps.acr-meta.outputs.server }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          echo "image-full=$FULL" >> $GITHUB_OUTPUT
+          echo "image-sha=$SHA_TAG" >> $GITHUB_OUTPUT
+
+      # ── Set up Docker Buildx ────────────────────────────────────────────
+      - name: 🛠️ Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ── Build & Push ─────────────────────────────────────────────────────
+      - name: 🚀 Build and push RAG image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile.rag-azure
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image-full }}
+            ${{ steps.meta.outputs.image-sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 2: Deploy to Azure App Service
+  # ─────────────────────────────────────────────────────────────────────────
+  deploy:
+    name: ☁️ Deploy to Azure App Service
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    environment:
+      name: production
+      url: https://cip-rag-13.azurewebsites.net
+
+    steps:
+      - name: 🔐 Login to Azure
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      # ── Get ACR login server ────────────────────────────────────────────
+      - name: 📦 Get ACR login server
+        id: acr-meta
+        run: |
+          ACR_SERVER=$(az acr show \
+            --name ${{ env.ACR_NAME }} \
+            --query loginServer \
+            --output tsv)
+          echo "server=$ACR_SERVER" >> $GITHUB_OUTPUT
+
+      # ── Set container image on App Service ─────────────────────────────
+      - name: 🐳 Update App Service container image
+        run: |
+          az webapp config container set \
+            --name ${{ env.APP_NAME }} \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --container-image-name "${{ steps.acr-meta.outputs.server }}/${{ env.IMAGE_NAME }}:${{ github.sha }}" \
+            --container-registry-url "https://${{ steps.acr-meta.outputs.server }}" \
+            --container-registry-user "${{ env.ACR_NAME }}" \
+            --container-registry-password "${{ secrets.ACR_PASSWORD }}"
+
+      # ── Sync App Settings (env vars on Azure) ───────────────────────────
+      - name: ⚙️ Sync App Service settings
+        run: |
+          az webapp config appsettings set \
+            --name ${{ env.APP_NAME }} \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --settings \
+              GROQ_API_KEY="${{ secrets.GROQ_API_KEY }}" \
+              LLM_MODEL_NAME="mock" \
+              EMBED_MODEL_NAME="sentence-transformers/all-MiniLM-L6-v2" \
+              CHUNK_SIZE="400" \
+              CHUNK_OVERLAP="50" \
+              TOP_K="5" \
+              WEBSITES_PORT="80" \
+              SCM_DO_BUILD_DURING_DEPLOYMENT="false"
+
+      # ── Restart the App Service to pick up new image ────────────────────
+      - name: 🔄 Restart App Service
+        run: |
+          az webapp restart \
+            --name ${{ env.APP_NAME }} \
+            --resource-group ${{ env.RESOURCE_GROUP }}
+
+      # ── Wait for app to come up ─────────────────────────────────────────
+      - name: ⏳ Wait for App Service to start (60s)
+        run: sleep 60
+
+      # ── Health Check ────────────────────────────────────────────────────
+      - name: 🏥 Health check – verify RAG endpoint
+        run: |
+          echo "Checking RAG health at https://cip-rag-13.azurewebsites.net/health ..."
+          for i in {1..6}; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+              https://cip-rag-13.azurewebsites.net/health --max-time 30 || echo "000")
+            echo "Attempt $i → HTTP $STATUS"
+            if [ "$STATUS" = "200" ]; then
+              echo "✅ RAG service is ONLINE"
+              curl -s https://cip-rag-13.azurewebsites.net/health | python3 -m json.tool
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "❌ RAG service did not respond with 200 after 6 attempts."
+          exit 1
+
+      # ── Annotate deployment ──────────────────────────────────────────────
+      - name: 📝 Deployment summary
+        run: |
+          echo "## RAG Deployment Complete 🎉" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Key | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **App Service** | \`cip-rag-13\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **URL** | https://cip-rag-13.azurewebsites.net |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Image** | \`${{ steps.acr-meta.outputs.server }}/weel13-rag:${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Endpoints** | \`/health\` · \`/answer\` · \`/answer-groq\` · \`/docs\` |" >> $GITHUB_STEP_SUMMARY

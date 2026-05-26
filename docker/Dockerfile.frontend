@@ -1,0 +1,28 @@
+FROM python:3.11-slim
+
+# Install system dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends git curl build-essential && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy requirements and install packages
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+ARG PORT=8501
+ENV PORT=${PORT}
+ENV WEBSITE_HOSTNAME=cip-frontend-13.azurewebsites.net
+ENV CONVERSION_SERVICE_URL=https://cip-app-13.azurewebsites.net
+ENV RAG_SERVICE_URL=https://cip-rag-13.azurewebsites.net
+# Copy application source code
+COPY app.py .
+COPY docker/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+# Streamlit runs on port 8501 by default
+EXPOSE 8501
+
+# Healthcheck for Azure
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD curl -f http://localhost:8501 || exit 1
+ENTRYPOINT ["/entrypoint.sh"]

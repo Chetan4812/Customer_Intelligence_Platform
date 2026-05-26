@@ -1,0 +1,378 @@
+name: Deploy – Customer Intelligence Platform
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+env:
+  ACR_LOGIN_SERVER: cipregistry13.azurecr.io
+  ACR_USERNAME:     cipregistry13
+  RESOURCE_GROUP:   cip-rg-13
+  APP_PLAN:         cip-plan
+  CONVERSION_APP:   cip-app-13
+  RAG_APP:          cip-rag-14
+  FRONTEND_APP:     cip-frontend-14
+  FRONTEND_APP_V2:  cip-frontend-v2-13
+  LOCATION:         centralindia
+
+jobs:
+  # ──────────────────────────────────────────────────────────────────────────
+  # 1. BUILD & TEST
+  # ──────────────────────────────────────────────────────────────────────────
+  build-and-test:
+    name: Build, Test & Push Images
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # Free up disk space – ubuntu-latest only has ~14 GB free
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          df -h
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
+
+      # Install lightweight packages only for CI (torch/transformers are in Docker)
+      - name: Install CI dependencies (lightweight)
+        run: |
+          python -m pip install --upgrade pip
+          pip install \
+            fastapi==0.110.0 uvicorn[standard]==0.27.0 pydantic==2.6.2 \
+            pandas==2.2.1 numpy scikit-learn==1.4.0 xgboost==2.0.3 scipy \
+            pandera==0.18.3 mlflow==2.12.1 httpx"<0.28.0" \
+            pytest pytest-asyncio httpx
+
+      - name: Generate Sample Data
+        run: python scripts/generate_sample_data.py
+
+      - name: Train Conversion Model
+        run: python services/conversion/train.py
+
+      - name: Run Unit & Integration Tests
+        run: python -m pytest tests/ -v --tb=short --ignore=tests/test_rag.py
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Log in to Azure Container Registry
+        run: |
+          ACR_PASSWORD=$(az acr credential show --name ${{ env.ACR_USERNAME }} --query "passwords[0].value" --output tsv)
+          docker login ${{ env.ACR_LOGIN_SERVER }} -u ${{ env.ACR_USERNAME }} -p "$ACR_PASSWORD"
+
+      # ── Conversion image ───────────────────────────────────────────────────
+      - name: Build & Push Conversion Image
+        run: |
+          docker build \
+            -f docker/Dockerfile.conversion \
+            -t ${{ env.ACR_LOGIN_SERVER }}/weel13-conversion:latest \
+            -t ${{ env.ACR_LOGIN_SERVER }}/weel13-conversion:${{ github.sha }} \
+            .
+          docker push ${{ env.ACR_LOGIN_SERVER }}/weel13-conversion:latest
+          docker push ${{ env.ACR_LOGIN_SERVER }}/weel13-conversion:${{ github.sha }}
+
+      # ── RAG image (Azure variant – listens on PORT env var, default 80) ────
+      - name: Build & Push RAG Image (Azure variant)
+        run: |
+          docker build \
+            -f docker/Dockerfile.rag-azure \
+            -t ${{ env.ACR_LOGIN_SERVER }}/weel13-rag-azure:latest \
+            -t ${{ env.ACR_LOGIN_SERVER }}/weel13-rag-azure:${{ github.sha }} \
+            .
+          docker push ${{ env.ACR_LOGIN_SERVER }}/weel13-rag-azure:latest
+          docker push ${{ env.ACR_LOGIN_SERVER }}/weel13-rag-azure:${{ github.sha }}
+
+      # ── Frontend image ─────────────────────────────────────────────────────
+      - name: Build & Push Frontend Image
+        run: |
+          docker build \
+            -f docker/Dockerfile.frontend \
+            -t ${{ env.ACR_LOGIN_SERVER }}/weel13-frontend:latest \
+            -t ${{ env.ACR_LOGIN_SERVER }}/weel13-frontend:${{ github.sha }} \
+            .
+          docker push ${{ env.ACR_LOGIN_SERVER }}/weel13-frontend:latest
+          docker push ${{ env.ACR_LOGIN_SERVER }}/weel13-frontend:${{ github.sha }}
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # 2. DEPLOY CONVERSION SERVICE  →  cip-app-13.azurewebsites.net
+  # ──────────────────────────────────────────────────────────────────────────
+  deploy-conversion:
+    name: Deploy Conversion Service
+    needs: build-and-test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Configure Conversion Web App container
+        run: |
+          ACR_PASSWORD=$(az acr credential show --name ${{ env.ACR_USERNAME }} --query "passwords[0].value" --output tsv)
+          az webapp config container set \
+            --name ${{ env.CONVERSION_APP }} \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --docker-custom-image-name ${{ env.ACR_LOGIN_SERVER }}/weel13-conversion:latest \
+            --docker-registry-server-url https://${{ env.ACR_LOGIN_SERVER }} \
+            --docker-registry-server-user ${{ env.ACR_USERNAME }} \
+            --docker-registry-server-password "$ACR_PASSWORD"
+
+      - name: Set Conversion App environment variables
+        run: |
+          az webapp config appsettings set \
+            --name ${{ env.CONVERSION_APP }} \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --settings \
+              SERVICE_NAME=conversion-service \
+              WEBSITES_PORT=8000
+
+      - name: Restart Conversion Web App
+        run: |
+          az webapp restart \
+            --name ${{ env.CONVERSION_APP }} \
+            --resource-group ${{ env.RESOURCE_GROUP }}
+
+      - name: Smoke-test Conversion /health (with polling)
+        run: |
+          TIMEOUT=180
+          INTERVAL=10
+          ELAPSED=0
+          while [ $ELAPSED -lt $TIMEOUT ]; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+              https://${{ env.CONVERSION_APP }}.azurewebsites.net/health)
+            echo "Conversion /health HTTP status: $STATUS (elapsed: ${ELAPSED}s)"
+            if [ "$STATUS" = "200" ]; then
+              echo "Conversion service is healthy!"
+              exit 0
+            fi
+            sleep $INTERVAL
+            ELAPSED=$((ELAPSED + INTERVAL))
+          done
+          echo "Conversion service failed to become healthy within $TIMEOUT seconds"
+          exit 1
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # 3. DEPLOY RAG SERVICE  →  cip-rag-13.azurewebsites.net  (Stretch goal)
+  # ──────────────────────────────────────────────────────────────────────────
+  deploy-rag:
+    name: Deploy RAG Service (Stretch – second cloud endpoint)
+    needs: build-and-test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Create RAG Web App (idempotent)
+        run: |
+          # Create the web app if it doesn't exist yet
+          az webapp create \
+            --name ${{ env.RAG_APP }} \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --plan ${{ env.APP_PLAN }} \
+            --deployment-container-image-name ${{ env.ACR_LOGIN_SERVER }}/weel13-rag-azure:latest \
+            2>/dev/null || true
+
+      - name: Configure RAG Web App container
+        run: |
+          ACR_PASSWORD=$(az acr credential show --name ${{ env.ACR_USERNAME }} --query "passwords[0].value" --output tsv)
+          az webapp config container set \
+            --name ${{ env.RAG_APP }} \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --docker-custom-image-name ${{ env.ACR_LOGIN_SERVER }}/weel13-rag-azure:latest \
+            --docker-registry-server-url https://${{ env.ACR_LOGIN_SERVER }} \
+            --docker-registry-server-user ${{ env.ACR_USERNAME }} \
+            --docker-registry-server-password "$ACR_PASSWORD"
+
+      - name: Set RAG App environment variables
+        run: |
+          az webapp config appsettings set \
+            --name ${{ env.RAG_APP }} \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --settings \
+              SERVICE_NAME=rag-service \
+              LLM_MODEL_NAME=mock \
+              EMBED_MODEL_NAME=sentence-transformers/all-MiniLM-L6-v2 \
+              CHUNK_SIZE=400 \
+              CHUNK_OVERLAP=50 \
+              TOP_K=5 \
+              MAX_NEW_TOKENS=512 \
+              WEBSITES_PORT=80 \
+              HF_HOME=/app/.cache/huggingface \
+              GROQ_API_KEY=${{ secrets.GROQ_API_KEY }}
+
+      - name: Restart RAG Web App
+        run: |
+          az webapp restart \
+            --name ${{ env.RAG_APP }} \
+            --resource-group ${{ env.RESOURCE_GROUP }}
+
+      - name: Smoke-test RAG /health (allow 90s for model load)
+        run: |
+          sleep 90
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            https://${{ env.RAG_APP }}.azurewebsites.net/health)
+          echo "RAG /health HTTP status: $STATUS"
+          [ "$STATUS" = "200" ] || echo "RAG still warming up – non-blocking"
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # 4. DEPLOY FRONTEND SERVICE  →  cip-frontend-13.azurewebsites.net
+  # ──────────────────────────────────────────────────────────────────────────
+  deploy-frontend:
+    name: Deploy Streamlit Frontend
+    needs: build-and-test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Create Frontend Web App (idempotent)
+        run: |
+          # Create the web app if it doesn't exist yet
+          az webapp create \
+            --name ${{ env.FRONTEND_APP }} \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --plan ${{ env.APP_PLAN }} \
+            --deployment-container-image-name ${{ env.ACR_LOGIN_SERVER }}/weel13-frontend:latest \
+            2>/dev/null || true
+
+      - name: Configure Frontend Web App container
+        run: |
+          ACR_PASSWORD=$(az acr credential show --name ${{ env.ACR_USERNAME }} --query "passwords[0].value" --output tsv)
+          az webapp config container set \
+            --name ${{ env.FRONTEND_APP }} \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --docker-custom-image-name ${{ env.ACR_LOGIN_SERVER }}/weel13-frontend:latest \
+            --docker-registry-server-url https://${{ env.ACR_LOGIN_SERVER }} \
+            --docker-registry-server-user ${{ env.ACR_USERNAME }} \
+            --docker-registry-server-password "$ACR_PASSWORD"
+
+      - name: Set Frontend App environment variables
+        run: |
+          az webapp config appsettings set \
+            --name ${{ env.FRONTEND_APP }} \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --settings \
+              WEBSITES_PORT=8501 \
+              ENVIRONMENT=production \
+              CONVERSION_SERVICE_URL=https://cip-app-13.azurewebsites.net \
+              RAG_SERVICE_URL=https://cip-rag-13.azurewebsites.net \
+              GROQ_API_KEY=${{ secrets.GROQ_API_KEY }}
+
+      - name: Restart Frontend Web App
+        run: |
+          az webapp restart \
+            --name ${{ env.FRONTEND_APP }} \
+            --resource-group ${{ env.RESOURCE_GROUP }}
+
+      - name: Smoke-test Frontend (with polling)
+        run: |
+          TIMEOUT=180
+          INTERVAL=15
+          ELAPSED=0
+          while [ $ELAPSED -lt $TIMEOUT ]; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+              https://${{ env.FRONTEND_APP }}.azurewebsites.net)
+            echo "Frontend HTTP status: $STATUS (elapsed: ${ELAPSED}s)"
+            if [ "$STATUS" = "200" ]; then
+              echo "✅ Frontend is live at https://${{ env.FRONTEND_APP }}.azurewebsites.net"
+              exit 0
+            fi
+            sleep $INTERVAL
+            ELAPSED=$((ELAPSED + INTERVAL))
+          done
+          echo "Frontend did not respond 200 within $TIMEOUT seconds"
+          exit 1
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # 5. DEPLOY FRONTEND V2 (NEW LINK)  →  cip-frontend-v2-13.azurewebsites.net
+  #    Uses /answer-groq RAG endpoint + Groq server-side key
+  # ──────────────────────────────────────────────────────────────────────────
+  deploy-frontend-v2:
+    name: Deploy Frontend V2 (New Link – Groq RAG)
+    needs: build-and-test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Create Frontend V2 Web App (idempotent)
+        run: |
+          az webapp create \
+            --name ${{ env.FRONTEND_APP_V2 }} \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --plan ${{ env.APP_PLAN }} \
+            --deployment-container-image-name ${{ env.ACR_LOGIN_SERVER }}/weel13-frontend:latest \
+            2>/dev/null || true
+
+      - name: Configure Frontend V2 container
+        run: |
+          ACR_PASSWORD=$(az acr credential show --name ${{ env.ACR_USERNAME }} --query "passwords[0].value" --output tsv)
+          az webapp config container set \
+            --name ${{ env.FRONTEND_APP_V2 }} \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --docker-custom-image-name ${{ env.ACR_LOGIN_SERVER }}/weel13-frontend:latest \
+            --docker-registry-server-url https://${{ env.ACR_LOGIN_SERVER }} \
+            --docker-registry-server-user ${{ env.ACR_USERNAME }} \
+            --docker-registry-server-password "$ACR_PASSWORD"
+
+      - name: Set Frontend V2 environment variables
+        run: |
+          az webapp config appsettings set \
+            --name ${{ env.FRONTEND_APP_V2 }} \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --settings \
+              WEBSITES_PORT=8501 \
+              ENVIRONMENT=production \
+              CONVERSION_SERVICE_URL=https://cip-app-13.azurewebsites.net \
+              RAG_SERVICE_URL=https://cip-rag-13.azurewebsites.net \
+              GROQ_API_KEY=${{ secrets.GROQ_API_KEY }}
+
+      - name: Restart Frontend V2 Web App
+        run: |
+          az webapp restart \
+            --name ${{ env.FRONTEND_APP_V2 }} \
+            --resource-group ${{ env.RESOURCE_GROUP }}
+
+      - name: Smoke-test Frontend V2 (with polling)
+        run: |
+          TIMEOUT=180
+          INTERVAL=15
+          ELAPSED=0
+          while [ $ELAPSED -lt $TIMEOUT ]; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+              https://${{ env.FRONTEND_APP_V2 }}.azurewebsites.net)
+            echo "Frontend V2 HTTP status: $STATUS (elapsed: ${ELAPSED}s)"
+            if [ "$STATUS" = "200" ]; then
+              echo "✅ Frontend V2 is live at https://${{ env.FRONTEND_APP_V2 }}.azurewebsites.net"
+              exit 0
+            fi
+            sleep $INTERVAL
+            ELAPSED=$((ELAPSED + INTERVAL))
+          done
+          echo "Frontend V2 did not respond 200 within $TIMEOUT seconds"
+          exit 1

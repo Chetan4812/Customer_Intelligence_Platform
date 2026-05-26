@@ -1,0 +1,79 @@
+services:
+  # ── Conversion Prediction Service ─────────────────────────────────────────
+  conversion:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.conversion
+    image: weel13-conversion:latest
+    container_name: weel13_conversion
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./models:/app/models # trained model artifact
+      - ./data/campaign:/app/data/campaign
+    environment:
+      - TARGET_COLUMN=converted
+      - NUMERIC_FEATURES=age,income,num_campaigns,num_clicks,num_opens,recency_days,tenure_days
+      - CATEGORICAL_FEATURES=gender,channel,product_category,region
+      - APPLICATIONINSIGHTS_CONNECTION_STRING=${APPLICATIONINSIGHTS_CONNECTION_STRING:-}
+      - SERVICE_NAME=conversion-service
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # ── Complaint Intelligence RAG Service ────────────────────────────────────
+  rag:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.rag
+    image: weel13-rag:latest
+    container_name: weel13_rag
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./data/complaints:/app/data/complaints # raw complaint documents
+      - ./rag:/app/rag # llm checkpoint + faiss index
+    environment:
+      - LLM_MODEL_NAME=TinyLlama/TinyLlama-1.1B-Chat-v1.0
+      - EMBED_MODEL_NAME=sentence-transformers/all-MiniLM-L6-v2
+      - CHUNK_SIZE=400
+      - CHUNK_OVERLAP=50
+      - TOP_K=5
+      - MAX_NEW_TOKENS=512
+      - APPLICATIONINSIGHTS_CONNECTION_STRING=${APPLICATIONINSIGHTS_CONNECTION_STRING:-}
+      - SERVICE_NAME=rag-service
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8001/health" ]
+      interval: 60s
+      timeout: 20s
+      retries: 3
+    restart: unless-stopped
+    # Llama 2 is memory-heavy; request extra memory if available
+    mem_limit: 8g
+    shm_size: 512m
+
+  # ── Streamlit Frontend Web App ──────────────────────────────────────────────
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frontend
+    image: weel13-frontend:latest
+    container_name: weel13_frontend
+    ports:
+      - "8501:8501"
+    environment:
+      - PORT=8501
+      - CONVERSION_SERVICE_URL=http://conversion:8000
+      - RAG_SERVICE_URL=http://rag:8001
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+      - ENVIRONMENT=local
+    depends_on:
+      conversion:
+        condition: service_healthy
+      rag:
+        condition: service_healthy
+    restart: unless-stopped
+

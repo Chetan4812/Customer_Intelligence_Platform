@@ -1,0 +1,2 @@
+Feedback #1003: The chat service went down on 2024-03-25 for 70 hours with no notification. This caused significant disruption to my work. The customer expressed strong dissatisfaction and requested escalation to a senior manager. They also mentioned they
+would consider switching providers if this issue is not resolved promptly. A follow-up call was scheduled.
