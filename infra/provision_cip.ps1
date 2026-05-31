@@ -12,8 +12,8 @@ param(
     [string]$Location         = "centralindia",
     [string]$AcrName          = "cipregistry15",
     [string]$AppPlan          = "cip-plan",
-    [string]$AppPlanLocation  = "southeastasia", # Southeast Asia supports Linux Free F1 SKU without quota limit
-    [string]$AppPlanSku       = "F1",            # Free Tier
+    [string]$AppPlanLocation  = "southeastasia", # Southeast Asia supports Linux plans without quota limits
+    [string]$AppPlanSku       = "B1",            # Basic Tier (recommended to avoid Free tier daily CPU minute limits with 4 concurrent apps)
     [string]$GroqApiKey       = $null
 )
 
