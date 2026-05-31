@@ -6,14 +6,14 @@ on:
   workflow_dispatch:
 
 env:
-  ACR_LOGIN_SERVER: cipregistry13.azurecr.io
-  ACR_USERNAME:     cipregistry13
-  RESOURCE_GROUP:   cip-rg-13
+  ACR_LOGIN_SERVER: cipregistry15.azurecr.io
+  ACR_USERNAME:     cipregistry15
+  RESOURCE_GROUP:   week_13_deployment_proj1
   APP_PLAN:         cip-plan
-  CONVERSION_APP:   cip-app-13
-  RAG_APP:          cip-rag-14
-  FRONTEND_APP:     cip-frontend-14
-  FRONTEND_APP_V2:  cip-frontend-v2-13
+  CONVERSION_APP:   cip-app-15
+  RAG_APP:          cip-rag-15
+  FRONTEND_APP:     cip-frontend-15
+  FRONTEND_APP_V2:  cip-frontend-v2-15
   LOCATION:         centralindia
 
 jobs:
