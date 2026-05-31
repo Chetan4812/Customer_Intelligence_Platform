@@ -276,8 +276,8 @@ jobs:
             --settings \
               WEBSITES_PORT=8501 \
               ENVIRONMENT=production \
-              CONVERSION_SERVICE_URL=https://cip-app-13.azurewebsites.net \
-              RAG_SERVICE_URL=https://cip-rag-13.azurewebsites.net \
+              CONVERSION_SERVICE_URL=https://cip-app-15.azurewebsites.net \
+              RAG_SERVICE_URL=https://cip-rag-15.azurewebsites.net \
               GROQ_API_KEY=${{ secrets.GROQ_API_KEY }}
 
       - name: Restart Frontend Web App
@@ -348,8 +348,8 @@ jobs:
             --settings \
               WEBSITES_PORT=8501 \
               ENVIRONMENT=production \
-              CONVERSION_SERVICE_URL=https://cip-app-13.azurewebsites.net \
-              RAG_SERVICE_URL=https://cip-rag-13.azurewebsites.net \
+              CONVERSION_SERVICE_URL=https://cip-app-15.azurewebsites.net \
+              RAG_SERVICE_URL=https://cip-rag-15.azurewebsites.net \
               GROQ_API_KEY=${{ secrets.GROQ_API_KEY }}
 
       - name: Restart Frontend V2 Web App
