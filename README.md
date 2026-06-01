@@ -125,9 +125,10 @@ docker-compose up --build
 
 | # | Service | URL | Status | Notes |
 |---|---|---|---|---|
-| 1 | ⚙️ Conversion API | [https://cip-app-13.azurewebsites.net](https://cip-app-13.azurewebsites.net) | ✅ 200 | XGBoost /predict, /batch-score, /customer-intel |
-| 2 | 💬 RAG API | [https://cip-rag-13.azurewebsites.net](https://cip-rag-13.azurewebsites.net) | ✅ 200 | FAISS + Groq /answer endpoint |
-| 3 | 🆕 Frontend V2 (new link) | [https://cip-frontend-v2-13.azurewebsites.net](https://cip-frontend-v2-13.azurewebsites.net) | ✅ 200 | Updated RAG call, Groq-powered |
+| 1 | ⚙️ Conversion API | [https://cip-app-15.azurewebsites.net](https://cip-app-15.azurewebsites.net) | ✅ 200 | XGBoost /predict, /batch-score, /customer-intel |
+| 2 | 💬 RAG API | [https://cip-rag-15.azurewebsites.net](https://cip-rag-15.azurewebsites.net) | ✅ 200 | FAISS + Groq /answer endpoint |
+| 3 | 💻 Streamlit Frontend (V1) | [https://cip-frontend-15.azurewebsites.net](https://cip-frontend-15.azurewebsites.net) | ✅ 200 | Interactive Streamlit Dashboard |
+| 4 | 🆕 Streamlit Frontend V2 | [https://cip-frontend-v2-15.azurewebsites.net](https://cip-frontend-v2-15.azurewebsites.net) | ✅ 200 | Updated RAG call, Groq-powered |
 
 ### Azure Deployment Commands
 
@@ -170,25 +171,25 @@ az acr credential show --name cipregistry13 --query "passwords[0].value" --outpu
 ```bash
 # 1. Update the container image
 az webapp config container set \
-  --name cip-rag-13 \
-  --resource-group cip-rg-13 \
-  --docker-custom-image-name cipregistry13.azurecr.io/weel13-rag-azure:latest \
-  --docker-registry-server-url https://cipregistry13.azurecr.io \
-  --docker-registry-server-user cipregistry13 \
+  --name cip-rag-15 \
+  --resource-group week_13_deployment_proj1 \
+  --docker-custom-image-name cipregistry15.azurecr.io/weel13-rag-azure:latest \
+  --docker-registry-server-url https://cipregistry15.azurecr.io \
+  --docker-registry-server-user cipregistry15 \
   --docker-registry-server-password <ACR_PASSWORD>
 
 # 2. Configure app settings (e.g. for Frontend V2)
 az webapp config appsettings set \
-  --name cip-frontend-v2-13 \
-  --resource-group cip-rg-13 \
+  --name cip-frontend-v2-15 \
+  --resource-group week_13_deployment_proj1 \
   --settings \
     WEBSITES_PORT=8501 \
     ENVIRONMENT=production \
-    CONVERSION_SERVICE_URL=https://cip-app-13.azurewebsites.net \
-    RAG_SERVICE_URL=https://cip-rag-13.azurewebsites.net \
+    CONVERSION_SERVICE_URL=https://cip-app-15.azurewebsites.net \
+    RAG_SERVICE_URL=https://cip-rag-15.azurewebsites.net \
     GROQ_API_KEY=<GROQ_API_KEY>
 
 # 3. Restart the web app to apply changes
-az webapp restart --name cip-frontend-v2-13 --resource-group cip-rg-13
+az webapp restart --name cip-frontend-v2-15 --resource-group week_13_deployment_proj1
 ```
 
